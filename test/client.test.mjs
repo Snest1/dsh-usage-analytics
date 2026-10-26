@@ -124,3 +124,85 @@ test('apply registers sidebar entry + overlay with right ids, injects locale + c
   assert.equal(typeof entry.component, 'function')
   assert.equal(typeof overlay.component, 'function')
 })
+
+/** Compile a real function/expression from the self-contained client bundle. */
+function compiled(source, start, end, args, result) {
+  const i = source.indexOf(start), j = source.indexOf(end, i)
+  assert.ok(i >= 0 && j > i, start)
+  return new Function(...args, source.slice(i, j) + '\nreturn ' + result)
+}
+
+test('time window filters activity cards and model usage consistently', () => {
+  const periodActivity = compiled(bundleSource,
+    'var periodActivity = useMemo(function () {',
+    '// Period-filtered per-model totals', [
+      'data', 'period', 'periodDays', 'isHourly', 'hourlyCutoff', 'useMemo',
+    ], 'periodActivity')
+  const periodModels = compiled(bundleSource,
+    'var periodModels = useMemo(function () {',
+    'var cardTokens =', [
+      'data', 'period', 'isHourly', 'hourlyData', 'useMemo', 'periodCutoffMs', 'dayOf',
+    ], 'periodModels')
+  const useMemo = (fn) => fn()
+  const dayOf = (key) => new Date(key + 'T00:00:00')
+  const data = {
+    sessions: 100, turns: 20, steps: 33, toolCalls: 42, skillCalls: 4,
+    pluginCalls: 2, subagentSessions: 8,
+    hourlyActivity: {
+      '2026-10-26-09': { turns: 1, toolCalls: 2, sessions: 1, pluginCalls: 1 },
+      '2026-10-26-10': { turns: 2, steps: 4, sessions: 2, toolCalls: 3, skillCalls: 2 },
+      '2026-10-26-11': { turns: 4, sessions: 1, toolCalls: 6, pluginCalls: 1 },
+    },
+    models: {
+      'qwen/m1': {
+        tokens: { total: 150, cacheRead: 900 },
+        dayTokens: { '2026-10-25': 50, '2026-10-26': 100 },
+        dayRaw: { '2026-10-25': 500, '2026-10-26': 550 },
+        dayOutput: { '2026-10-25': 10, '2026-10-26': 20 },
+        dayCalls: { '2026-10-25': 1, '2026-10-26': 2 },
+        hourlyTokens: {
+          '2026-10-26-09': { newT: 30, raw: 130, output: 5, calls: 1 },
+          '2026-10-26-10': { newT: 40, raw: 240, output: 8, calls: 1 },
+          '2026-10-26-11': { newT: 30, raw: 180, output: 7, calls: 1 },
+        },
+      },
+    },
+  }
+  const days = { '2026-10-25': { sessions: 1, turns: 3 }, '2026-10-26': { sessions: 3, turns: 4, steps: 5, pluginCalls: 2 } }
+  const activity = (period, isHourly, cutoff, cells = days) => periodActivity(data, period, cells, isHourly, cutoff, useMemo)
+  assert.equal(activity('all', false, 0).sessions, 100)
+  assert.deepEqual([activity(30, false, 0).sessions, activity(30, false, 0).turns], [4, 7])
+  const cutoff = Date.parse('2026-10-26T10:00:00')
+  assert.deepEqual([activity('24h', true, cutoff).sessions, activity('24h', true, cutoff).turns,
+    activity('24h', true, cutoff).toolCalls, activity('24h', true, cutoff).pluginCalls], [3, 6, 9, 1])
+  const hourlyData = { '2026-10-26-10': 240, '2026-10-26-11': 180 }
+  const models24h = periodModels(data, '24h', true, hourlyData, useMemo, () => cutoff, dayOf)
+  assert.equal(models24h['qwen/m1'].tokens.total, 70)
+  assert.equal(models24h['qwen/m1'].tokens.cacheRead, 350)
+  assert.equal(models24h['qwen/m1'].calls, 2)
+  const modelDay = periodModels(data, 30, false, null, useMemo,
+    () => Date.parse('2026-10-26T00:00:00'), dayOf)
+  assert.equal(modelDay['qwen/m1'].tokens.total, 100)
+  assert.equal(modelDay['qwen/m1'].tokens.cacheRead, 450)
+})
+
+test('model mix modes and token mix percentages use their stated denominator', () => {
+  const element = (type, props, ...children) => ({ type, props, children })
+  const share = compiled(bundleSource, 'function ModelShare(props) {', '/**\n\t\t * Token mix', [
+    'createElement', 'LegendRow', 'fmtTokens', 'fmtInt', 'fmtPct',
+  ], 'ModelShare')(element, () => {}, String, String, String)
+  const models = {
+    'p/a': { calls: 2, tokens: { total: 20, cacheRead: 80 } },
+    'p/b': { calls: 3, tokens: { total: 80, cacheRead: 0 } },
+  }
+  const percentages = (mode) => share({ models, tokenMode: mode, t: (k) => k })
+    .children[1].children[0].map((x) => x.props.pct)
+  assert.deepEqual(percentages('fresh'), [80, 20])
+  assert.ok(Math.abs(percentages('all')[0] - 100 / 180 * 100) < 0.0001)
+  assert.ok(Math.abs(percentages('all')[1] - 80 / 180 * 100) < 0.0001)
+  const mix = compiled(bundleSource, 'function TokenMix(props) {', '/** Insight card grid. */', [
+    'createElement', 'LegendRow', 'fmtTokens', 'fmtPct',
+  ], 'TokenMix')(element, () => {}, String, String)
+  const tree = mix({ tokens: { input: 10, output: 5, cacheRead: 85 }, t: (k) => k })
+  assert.deepEqual(tree.children[0].children[0].map((e) => e.props.style.width), ['10%', '5%', '85%'])
+})

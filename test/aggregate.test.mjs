@@ -17,6 +17,8 @@ import {
   mergeInto,
   topN,
   weekKey,
+  hourKey,
+  isPluginTool,
 } from '../lib/aggregate.js'
 
 /** Build a session header. */
@@ -210,4 +212,67 @@ test('fold watermark: folding a tail never double counts', () => {
   ])
   assert.equal(w2, 3)
   assert.equal(stats.tokens.total, 165)
+})
+
+test('plugin calls include namespaced MCP tools while ordinary tools stay separate', () => {
+  for (const name of ['mcp', 'cordis_memory', 'docmost__search_pages', 'google_drive__lookup']) {
+    assert.equal(isPluginTool(name), true)
+  }
+  for (const name of ['bash', 'read', 'skill', 'subagent']) assert.equal(isPluginTool(name), false)
+  const at = Date.parse('2026-10-26T10:15:00')
+  const stats = aggregateSession(header({ createdAt: at }), [
+    ev('tool/call', { name: 'docmost__search_pages' }, at, 0),
+    ev('tool/call', { name: 'mcp' }, at + 100, 1),
+    ev('tool/call', { name: 'skill', arguments: '{"name":"some-skill"}' }, at + 200, 2),
+    ev('tool/call', { name: 'read' }, at + 300, 3),
+  ])
+  const agg = aggregateFromSessions({ x: stats })
+  assert.equal(agg.pluginCalls, 2)
+  assert.equal(agg.skillCalls, 1)
+  assert.equal(agg.toolCalls, 4)
+  assert.equal(agg.days[dayKey(at)].pluginCalls, 2)
+  assert.equal(agg.days[dayKey(at)].skillCalls, 1)
+  assert.equal(agg.hourlyActivity[hourKey(at)].toolCalls, 4)
+  assert.equal(agg.hourlyActivity[hourKey(at)].pluginCalls, 2)
+  assert.equal(agg.hourlyActivity[hourKey(at)].skillCalls, 1)
+})
+
+test('activity includes no-token sessions and subagents on creation day/hour', () => {
+  const at = Date.parse('2026-10-25T10:00:00')
+  const later = Date.parse('2026-10-26T11:00:00')
+  const idle = aggregateSession(header({ createdAt: at, id: 'idle' }), [])
+  const sub = aggregateSession(header({ createdAt: later, id: 'sub', origin: 'subagent' }), [
+    ev('turn/start', {}, later + 1000, 0),
+    ev('step/start', {}, later + 2000, 1),
+    ev('tool/call', { name: 'read' }, later + 3000, 2),
+  ])
+  const agg = aggregateFromSessions({ idle, sub })
+  assert.equal(agg.sessions, 2)
+  assert.equal(agg.subagentSessions, 1)
+  assert.equal(agg.days[dayKey(at)].sessions, 1)
+  assert.equal(agg.days[dayKey(later)].sessions, 1)
+  assert.equal(agg.days[dayKey(later)].subagentSessions, 1)
+  assert.equal(agg.days[dayKey(later)].turns, 1)
+  assert.equal(agg.hourlyActivity[hourKey(at)].sessions, 1)
+  assert.equal(agg.hourlyActivity[hourKey(later)].subagentSessions, 1)
+  assert.equal(agg.hourlyActivity[hourKey(later)].steps, 1)
+})
+
+test('model hourly buckets match per-model daily and global raw/new totals', () => {
+  const at = Date.parse('2026-10-26T10:00:00')
+  const later = Date.parse('2026-10-26T11:00:00')
+  const stats = aggregateSession(header({ createdAt: at }), [
+    ev('request/context', { provider: 'test', model: 'm' }, at, 0),
+    ev('assistant/message', { usage: { inputTokens: 11, cacheReadTokens: 90, outputTokens: 4 } }, at + 1000, 1),
+    ev('assistant/message', { usage: { inputTokens: 12, cacheReadTokens: 120, outputTokens: 5 } }, later, 2),
+  ])
+  const agg = aggregateFromSessions({ test: stats })
+  const model = agg.models['test/m']
+  assert.deepEqual(model.hourlyTokens[hourKey(at)], { newT: 15, raw: 105, output: 4, calls: 1 })
+  assert.deepEqual(model.hourlyTokens[hourKey(later)], { newT: 17, raw: 137, output: 5, calls: 1 })
+  assert.equal(model.dayTokens[dayKey(at)], 32)
+  assert.equal(model.dayRaw[dayKey(at)], 242)
+  assert.equal(agg.tokens.total, 32)
+  assert.equal(agg.tokens.cacheRead, 210)
+  assert.equal(agg.hourlyTokens[hourKey(at)] + agg.hourlyTokens[hourKey(later)], 242)
 })

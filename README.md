@@ -122,3 +122,12 @@ Session forks that were created but never ran — their entire log is a copied s
 ## License
 
 Apache-2.0 — see [LICENSE](./LICENSE).
+
+### Understanding the dashboard numbers
+
+- **Period** (`Today`, `24h`, `7/30/90 days`, `All time`) applies to the headline, cache rate, token mix, model share, sessions, turns, steps, tool calls, skills and plugin calls. The last 7/30/90 days are **calendar days including today**; Today/24h use hourly buckets.
+- **Activity heatmap** and **Personal insights (all time)** always cover the full recorded history and are explicitly marked as such.
+- **Period tokens** = fresh input + output + cache-write tokens + cache-hit reads. **Model share** defaults to this same basis, with a toggle to exclude cached reads.
+- **Token mix** uses the headline's total as its denominator: fresh input (including cache writes), output, and cache-hit reads. The separate cache-hit rate is the share of cached reads in all input tokens.
+- **Model usage records** count assistant-message events with usage metadata, not guaranteed to be identical to the number of HTTP requests to the provider. **Plugin calls** include Cordis dynamic tools, the MCP dispatcher and namespaced MCP tools.
+- Cache-hit tokens reflect *provider-reported* reuse; they do not directly measure MLX-Serve's internal KV-cache or GPU efficiency.
